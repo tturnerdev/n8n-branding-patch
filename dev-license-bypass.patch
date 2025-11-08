@@ -1,0 +1,280 @@
+diff --git a/packages/@n8n/backend-common/src/logging/logger.ts b/packages/@n8n/backend-common/src/logging/logger.ts
+index 84c0e08a78..cb116cade3 100644
+--- a/packages/@n8n/backend-common/src/logging/logger.ts
++++ b/packages/@n8n/backend-common/src/logging/logger.ts
+@@ -156,7 +156,7 @@ export class Logger implements LoggerType {
+ 		} else if (this.level === 'debug' && inProduction) {
+ 			return this.debugProdConsoleFormat();
+ 		} else {
+-			return winston.format.printf(({ message }: { message: string }) => message);
++			return winston.format.printf((info: TransformableInfo) => info.message as string);
+ 		}
+ 	}
+ 
+diff --git a/packages/@n8n/node-cli/src/configs/eslint.ts b/packages/@n8n/node-cli/src/configs/eslint.ts
+index 078d34d4df..77a69a60c2 100644
+--- a/packages/@n8n/node-cli/src/configs/eslint.ts
++++ b/packages/@n8n/node-cli/src/configs/eslint.ts
+@@ -64,7 +64,7 @@ function createConfig(supportCloud = true): ConfigArray {
+ 		},
+ 	);
+ }
+-export const config = createConfig();
+-export const configWithoutCloudSupport = createConfig(false);
++export const config: ConfigArray = createConfig();
++export const configWithoutCloudSupport: ConfigArray = createConfig(false);
+ 
+ export default config;
+diff --git a/packages/cli/src/license.ts b/packages/cli/src/license.ts
+index 1bb5100fc7..2d0d3c3ef0 100644
+--- a/packages/cli/src/license.ts
++++ b/packages/cli/src/license.ts
+@@ -49,6 +49,70 @@ export class License implements LicenseProvider {
+ 		forceRecreate = false,
+ 		isCli = false,
+ 	}: { forceRecreate?: boolean; isCli?: boolean } = {}) {
++
++		// Only enable the dev bypass when explicitly configured via env var or running in development mode.
++		// Avoid accidental enabling of enterprise features in production.
++		// Use globalThis to avoid referencing the bare `process` identifier (prevents TS errors when @types/node isn't present)
++		const _env = (globalThis as any).process?.env ?? {};
++		const DEV_LICENSE_BYPASS = (_env.N8N_DEV_LICENSE_BYPASS === 'true') || (_env.NODE_ENV === 'development');
++
++		if (DEV_LICENSE_BYPASS) {
++			this.logger.warn('DEV MODE: License manager bypassed. All enterprise features ENABLED.');
++
++		// Create a fake manager with full entitlements
++		const fakeEntitlements: any[] = [
++			{
++				productId: 'n8n-enterprise',
++				productMetadata: {
++					planName: 'Enterprise',
++					terms: { isMainPlan: true },
++				},
++				validFrom: new Date(),
++				validTo: new Date('2099-12-31'),
++				features: Object.fromEntries(
++					Object.keys(LICENSE_FEATURES).map((f) => [f, true])
++				),
++				quotas: {
++					[LICENSE_QUOTAS.USERS_LIMIT]: UNLIMITED_LICENSE_QUOTA,
++					[LICENSE_QUOTAS.TRIGGER_LIMIT]: UNLIMITED_LICENSE_QUOTA,
++					[LICENSE_QUOTAS.VARIABLES_LIMIT]: UNLIMITED_LICENSE_QUOTA,
++					[LICENSE_QUOTAS.AI_CREDITS]: 99999999,
++					[LICENSE_QUOTAS.WORKFLOW_HISTORY_PRUNE_LIMIT]: UNLIMITED_LICENSE_QUOTA,
++					[LICENSE_QUOTAS.TEAM_PROJECT_LIMIT]: UNLIMITED_LICENSE_QUOTA,
++				},
++			},
++		];
++
++		// @ts-ignore — we're faking the whole SDK
++		this.manager = {
++			hasFeatureEnabled: () => true,
++			getFeatureValue: (feature: string) => {
++				if (feature === 'planName') return 'Enterprise';
++				if (feature === 'enterprise') return true;
++				if (Object.values(LICENSE_QUOTAS).includes(feature as any)) {
++					return UNLIMITED_LICENSE_QUOTA;
++				}
++				return true;
++			},
++			getCurrentEntitlements: () => fakeEntitlements,
++			getManagementJwt: () => 'dev-jwt-fake',
++			getConsumerId: () => 'dev-consumer-id',
++			toString: () => 'DEV UNLOCKED: Enterprise (unlimited)',
++			activate: async () => {},
++			renew: async () => {},
++			reload: async () => {},
++			clear: async () => {},
++			shutdown: async () => {},
++			enableAutoRenewals: () => {},
++			disableAutoRenewals: () => {},
++			initialize: async () => {},
++		} as any;
++
++			this.logger.debug('Fake license manager initialized');
++			return;
++		}
++
++		// Real license manager initialization (when bypass is NOT enabled)
+ 		if (this.manager && !forceRecreate) {
+ 			this.logger.warn('License manager already initialized or shutting down');
+ 			return;
+@@ -129,7 +193,7 @@ export class License implements LicenseProvider {
+ 		if (ephemeralLicense) {
+ 			return ephemeralLicense;
+ 		}
+-		const databaseSettings = await this.settingsRepository.findOne({
++		const databaseSettings = await (this.settingsRepository as any).findOne({
+ 			where: {
+ 				key: SETTINGS_LICENSE_CERT_KEY,
+ 			},
+@@ -156,7 +220,7 @@ export class License implements LicenseProvider {
+ 	async saveCertStr(value: TLicenseBlock): Promise<void> {
+ 		// if we have an ephemeral license, we don't want to save it to the database
+ 		if (this.globalConfig.license.cert) return;
+-		await this.settingsRepository.upsert(
++		await (this.settingsRepository as any).upsert(
+ 			{
+ 				key: SETTINGS_LICENSE_CERT_KEY,
+ 				value,
+diff --git a/packages/frontend/editor-ui/src/app/components/EnterpriseEdition.ee.vue b/packages/frontend/editor-ui/src/app/components/EnterpriseEdition.ee.vue
+index 50fc0aa748..6050644339 100644
+--- a/packages/frontend/editor-ui/src/app/components/EnterpriseEdition.ee.vue
++++ b/packages/frontend/editor-ui/src/app/components/EnterpriseEdition.ee.vue
+@@ -3,6 +3,10 @@ import { computed } from 'vue';
+ import type { EnterpriseEditionFeatureValue } from '@/Interface';
+ import { useSettingsStore } from '@/app/stores/settings.store';
+ 
++// Enable the dev bypass when the Vite env flag is set or when running in development mode.
++// This ensures the unconditional show of EE features is only active for local/dev runs.
++const DEV_LICENSE_BYPASS = (import.meta.env.VITE_DEV_LICENSE_BYPASS === 'true') || import.meta.env.MODE === 'development';
++
+ const props = withDefaults(
+ 	defineProps<{
+ 		features: EnterpriseEditionFeatureValue[];
+@@ -23,8 +27,8 @@ const canAccess = computed(() =>
+ </script>
+ 
+ <template>
+-	<div>
+-		<slot v-if="canAccess" />
+-		<slot v-else name="fallback" />
+-	</div>
++  <div>
++	<slot v-if="DEV_LICENSE_BYPASS || canAccess" />
++	<slot v-else name="fallback" />
++  </div>
+ </template>
+diff --git a/packages/frontend/editor-ui/src/app/stores/settings.store.ts b/packages/frontend/editor-ui/src/app/stores/settings.store.ts
+index 292386b122..604fc7665d 100644
+--- a/packages/frontend/editor-ui/src/app/stores/settings.store.ts
++++ b/packages/frontend/editor-ui/src/app/stores/settings.store.ts
+@@ -63,7 +63,14 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
+ 		secureCookie: settings.value.authCookie.secure,
+ 	}));
+ 
+-	const isEnterpriseFeatureEnabled = computed(() => settings.value.enterprise ?? {});
++	const isEnterpriseFeatureEnabled = computed(() => {
++		// DEV LICENSE BYPASS: Return all enterprise features enabled
++		const devBypass = (import.meta.env.VITE_DEV_LICENSE_BYPASS === 'true') || import.meta.env.MODE === 'development';
++		if (devBypass) {
++			return new Proxy({}, { get: () => true });
++		}
++		return settings.value.enterprise ?? {};
++	});
+ 
+ 	const nodeJsVersion = computed(() => settings.value.nodeJsVersion);
+ 
+diff --git a/packages/frontend/editor-ui/src/shims.d.ts b/packages/frontend/editor-ui/src/shims.d.ts
+index 75f5b428a1..41cd117745 100644
+--- a/packages/frontend/editor-ui/src/shims.d.ts
++++ b/packages/frontend/editor-ui/src/shims.d.ts
+@@ -17,6 +17,7 @@ declare global {
+ 			NODE_ENV: 'development' | 'production';
+ 			VUE_APP_URL_BASE_API: string;
+ 			VUE_SCAN: boolean;
++			VITE_DEV_LICENSE_BYPASS?: string;
+ 		};
+ 	}
+ 
+diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
+index 5eadadc39f..3a9d9154c5 100644
+--- a/pnpm-workspace.yaml
++++ b/pnpm-workspace.yaml
+@@ -5,19 +5,13 @@ packages:
+   - packages/extensions/**
+   - packages/testing/**
+ 
+-minimumReleaseAge: 2880 # 2 days
+-minimumReleaseAgeExclude:
+-  - '@n8n/*'
+-  - '@n8n_io/*'
+-  - eslint-plugin-storybook
+-
+ catalog:
+-  '@n8n/typeorm': 0.3.20-15
+-  '@n8n_io/ai-assistant-sdk': 1.17.0
+-  '@langchain/core': 0.3.68
+-  '@langchain/openai': 0.6.16
+   '@langchain/anthropic': 0.3.26
+   '@langchain/community': 0.3.50
++  '@langchain/core': 0.3.68
++  '@langchain/openai': 0.6.16
++  '@n8n/typeorm': 0.3.20-15
++  '@n8n_io/ai-assistant-sdk': 1.17.0
+   '@sentry/node': ^9.42.1
+   '@types/basic-auth': ^1.1.3
+   '@types/express': ^5.0.1
+@@ -30,6 +24,7 @@ catalog:
+   basic-auth: 2.0.1
+   callsites: 3.1.0
+   chokidar: 4.0.3
++  eslint: 9.29.0
+   fast-glob: 3.2.12
+   fastest-levenshtein: 1.0.16
+   flatted: 3.2.7
+@@ -37,17 +32,21 @@ catalog:
+   http-proxy-agent: 7.0.2
+   https-proxy-agent: 7.0.6
+   iconv-lite: 0.6.3
+-  jsonwebtoken: 9.0.2
+   js-base64: 3.7.2
++  jsonwebtoken: 9.0.2
+   lodash: 4.17.21
+   luxon: 3.4.4
++  mysql2: 3.15.0
+   nanoid: 3.3.8
++  nodemailer: 7.0.10
+   picocolors: 1.0.1
+   reflect-metadata: 0.2.2
+   rimraf: 6.0.1
++  run-script-os: 1.1.6
++  simple-git: 3.28.0
+   tsdown: ^0.15.6
+   tsx: ^4.19.3
+-  simple-git: 3.28.0
++  typescript: 5.9.2
+   uuid: 10.0.0
+   vite: npm:rolldown-vite@latest
+   vite-plugin-dts: ^4.5.4
+@@ -57,11 +56,6 @@ catalog:
+   xss: 1.0.15
+   zod: 3.25.67
+   zod-to-json-schema: 3.23.3
+-  typescript: 5.9.2
+-  eslint: 9.29.0
+-  mysql2: 3.15.0
+-  run-script-os: 1.1.6
+-  nodemailer: 7.0.10
+ 
+ catalogs:
+   frontend:
+@@ -69,16 +63,23 @@ catalogs:
+     '@testing-library/jest-dom': ^6.6.3
+     '@testing-library/user-event': ^14.6.1
+     '@testing-library/vue': ^8.1.0
++    '@vitejs/plugin-vue': ^5.2.4
+     '@vue/test-utils': ^2.4.6
+     '@vue/tsconfig': ^0.7.0
+     '@vueuse/core': ^10.11.0
+-    '@vitejs/plugin-vue': ^5.2.4
++    element-plus: 2.4.3
++    highlight.js: ^11.8.0
+     pinia: ^2.2.4
+     unplugin-icons: ^0.19.0
+     vue: ^3.5.13
+     vue-i18n: ^11.1.2
++    vue-markdown-render: ^2.2.1
+     vue-router: ^4.5.0
+     vue-tsc: ^2.2.8
+-    vue-markdown-render: ^2.2.1
+-    highlight.js: ^11.8.0
+-    element-plus: 2.4.3
++
++minimumReleaseAge: 2880
++
++minimumReleaseAgeExclude:
++  - '@n8n/*'
++  - '@n8n_io/*'
++  - eslint-plugin-storybook
